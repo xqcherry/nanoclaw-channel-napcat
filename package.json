@@ -1,0 +1,25 @@
+{
+  "name": "nanoclaw-channel-napcat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "build": "tsc --noEmit",
+    "install:channel": "node scripts/channel.mjs install",
+    "uninstall:channel": "node scripts/channel.mjs uninstall",
+    "test:host": "node scripts/verify-host.mjs"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.7",
+    "@types/ws": "8.18.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

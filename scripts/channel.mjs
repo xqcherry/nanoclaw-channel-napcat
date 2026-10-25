@@ -1,0 +1,405 @@
+#!/usr/bin/env node
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import ts from "typescript";
+
+const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const statePath = ".claude/skills/add-napcat/install-state.json";
+const importLine = "import './napcat.js';\n";
+const pins = [
+  ["dependencies", "ws", "8.22.0"],
+  ["devDependencies", "@types/ws", "8.18.2"],
+];
+const entries = [
+  ["src/channels/napcat.ts", "src/channels/napcat.ts"],
+  ...["adapter", "connection", "messages"].map((n) => [
+    `src/channels/napcat/${n}.ts`,
+    `src/channels/napcat/${n}.ts`,
+  ]),
+  [
+    "src/channels/napcat.registration.test.ts",
+    "src/channels/napcat.registration.test.ts",
+  ],
+  ...["SKILL.md", "REMOVE.md"].map((n) => [
+    `skills/add-napcat/${n}`,
+    `.claude/skills/add-napcat/${n}`,
+  ]),
+  ["config.example.env", ".claude/skills/add-napcat/config.example.env"],
+  ["README.md", ".claude/skills/add-napcat/README.md"],
+];
+const owned = new Set(entries.map((e) => e[1]));
+const hash = (data) => createHash("sha256").update(data).digest("hex");
+async function optional(file) {
+  try {
+    return await fs.readFile(file);
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+async function safe(target, rel) {
+  if (path.isAbsolute(rel) || rel.split("/").includes(".."))
+    throw new Error(`Unsafe path: ${rel}`);
+  let current = target;
+  for (const part of rel.split("/")) {
+    current = path.join(current, part);
+    try {
+      if ((await fs.lstat(current)).isSymbolicLink())
+        throw new Error(`Conflict: symlink ${rel}`);
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+  }
+  return path.join(target, rel);
+}
+function parsed(text, name) {
+  return ts.createSourceFile(
+    name,
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+}
+async function compatibility(target) {
+  const current = await fs.readFile(
+    await safe(target, "src/channels/adapter.ts"),
+    "utf8",
+  );
+  const baseline = await fs.readFile(
+    path.join(source, "tests/host/channels/adapter.ts"),
+    "utf8",
+  );
+  const printer = ts.createPrinter({ removeComments: true });
+  const declarations = (text) =>
+    new Map(
+      parsed(text, "adapter.ts")
+        .statements.filter(ts.isInterfaceDeclaration)
+        .map((n) => [n.name.text, n]),
+    );
+  const actual = declarations(current),
+    expected = declarations(baseline);
+  const signature = (n) =>
+    printer
+      .printNode(ts.EmitHint.Unspecified, n, n.getSourceFile())
+      .replace(/\s+/g, "");
+  for (const name of [
+    "ChannelAdapter",
+    "ChannelSetup",
+    "InboundMessage",
+    "OutboundMessage",
+    "ChannelDefaults",
+    "ChannelContextDefaults",
+  ]) {
+    const a = actual.get(name),
+      b = expected.get(name);
+    if (!a) throw new Error(`Incompatible host: missing ${name}`);
+    const members = new Map(a.members.map((n) => [n.name?.getText(), n]));
+    for (const member of b.members) {
+      const other = members.get(member.name?.getText());
+      if (!other || signature(member) !== signature(other))
+        throw new Error(
+          `Incompatible host: ${name}.${member.name?.getText()} signature changed`,
+        );
+    }
+    const names = new Set(b.members.map((n) => n.name?.getText()));
+    for (const member of a.members)
+      if (!names.has(member.name?.getText()) && !member.questionToken)
+        throw new Error(
+          `Incompatible host: required ${name}.${member.name?.getText()}`,
+        );
+  }
+  for (const [file, symbol] of [
+    ["src/channels/channel-registry.ts", "registerChannelAdapter"],
+    ["src/channels/question-render-registry.ts", "resolveQuestionRender"],
+    ["src/env.ts", "readEnvFile"],
+  ]) {
+    const text = await fs.readFile(await safe(target, file), "utf8");
+    if (
+      !parsed(text, file).statements.some(
+        (n) =>
+          ts.isFunctionDeclaration(n) &&
+          n.name?.text === symbol &&
+          n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword),
+      )
+    )
+      throw new Error(`Incompatible host: missing export ${symbol}`);
+  }
+}
+async function usedElsewhere(target, excluded) {
+  async function walk(dir) {
+    for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+      if (e.isSymbolicLink()) continue;
+      const file = path.join(dir, e.name),
+        rel = path.relative(target, file).split(path.sep).join("/");
+      if (e.isDirectory()) {
+        if (await walk(file)) return true;
+      } else if (/\.[cm]?[jt]sx?$/.test(file) && !excluded.has(rel)) {
+        const text = await fs.readFile(file, "utf8");
+        if (
+          /(?:from\s*|import\s*\(|require\s*\()\s*['"](?:ws|@types\/ws)(?:\/[^'"]*)?['"]/.test(
+            text,
+          )
+        )
+          return true;
+      }
+    }
+    return false;
+  }
+  for (const root of ["src", "scripts", "setup", "container"]) {
+    try {
+      if (await walk(path.join(target, root))) return true;
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+  }
+  return false;
+}
+async function updatedLock(target, pkg) {
+  const pnpm =
+    !!(await optional(path.join(target, "pnpm-lock.yaml"))) ||
+    pkg.packageManager?.startsWith("pnpm@");
+  const lock = pnpm ? "pnpm-lock.yaml" : "package-lock.json";
+  const staging = await fs.mkdtemp(path.join(tmpdir(), "napcat-lock-"));
+  try {
+    await fs.writeFile(
+      path.join(staging, "package.json"),
+      JSON.stringify(pkg, null, 2) + "\n",
+    );
+    for (const f of [lock, "pnpm-workspace.yaml", ".npmrc"]) {
+      const data = await optional(await safe(target, f));
+      if (data) await fs.writeFile(path.join(staging, f), data);
+    }
+    const command = pnpm ? "pnpm" : "npm";
+    const args = pnpm
+      ? ["install", "--lockfile-only", "--ignore-scripts"]
+      : [
+          "install",
+          "--package-lock-only",
+          "--ignore-scripts",
+          "--no-audit",
+          "--no-fund",
+        ];
+    const result = spawnSync(command, args, {
+      cwd: staging,
+      encoding: "utf8",
+      timeout: 180_000,
+    });
+    if (result.status !== 0)
+      throw new Error(
+        `Dependency lock generation failed (${command}); target unchanged. ${result.error?.message ?? ""}\n${result.stderr || result.stdout}`,
+      );
+    return [lock, await fs.readFile(path.join(staging, lock))];
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true });
+  }
+}
+async function apply(target, changes) {
+  const before = new Map();
+  for (const rel of changes.keys())
+    before.set(rel, await optional(await safe(target, rel)));
+  const write = async (rel, data) => {
+    const file = await safe(target, rel);
+    if (data === null) {
+      await fs.rm(file, { force: true });
+      return;
+    }
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const temp = file + `.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(temp, data);
+      await fs.rename(temp, file);
+    } finally {
+      await fs.rm(temp, { force: true });
+    }
+  };
+  try {
+    for (const [rel, data] of changes) await write(rel, data);
+  } catch (error) {
+    for (const [rel, data] of [...before].reverse()) await write(rel, data);
+    throw error;
+  }
+  // Remove only empty owned directories, preserving additional user files.
+  const dirs = new Set(
+    [...changes.keys()]
+      .filter((k) => owned.has(k) || k === statePath)
+      .map((k) => path.dirname(k)),
+  );
+  for (const dir of [...dirs].sort((a, b) => b.length - a.length))
+    await fs.rmdir(path.join(target, dir)).catch((e) => {
+      if (!["ENOENT", "ENOTEMPTY"].includes(e.code)) throw e;
+    });
+}
+async function main() {
+  const [command, ...args] = process.argv.slice(2);
+  if (!["install", "uninstall"].includes(command))
+    throw new Error(
+      "Usage: node scripts/channel.mjs install|uninstall --target <NanoClaw path> [--dry-run]",
+    );
+  let targetArg,
+    dry = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--target" && args[i + 1] && !args[i + 1].startsWith("--"))
+      targetArg = args[++i];
+    else if (args[i] === "--dry-run") dry = true;
+    else throw new Error(`Unknown or incomplete argument: ${args[i]}`);
+  }
+  if (!targetArg) throw new Error("Explicit --target is required");
+  const target = await fs.realpath(path.resolve(targetArg));
+  if (target === source)
+    throw new Error("Target must be a NanoClaw host, not this source package");
+  let lockHandle;
+  if (!dry)
+    lockHandle = await fs
+      .open(await safe(target, ".napcat-install.lock"), "wx")
+      .catch(() => {
+        throw new Error(
+          "Install lock exists; confirm no installer is running before removing .napcat-install.lock",
+        );
+      });
+  try {
+    const stateFile = await safe(target, statePath),
+      stateBytes = await optional(stateFile),
+      state = stateBytes ? JSON.parse(stateBytes) : null;
+    if (
+      state &&
+      (state.version !== 1 ||
+        !state.files ||
+        Object.keys(state.files).some((k) => !owned.has(k)))
+    )
+      throw new Error("Conflict: invalid installation manifest");
+    if (command === "install") await compatibility(target);
+    if (command === "uninstall" && !state) {
+      console.log("NapCat is not installed; no changes");
+      return;
+    }
+    for (const rel of owned) {
+      const data = await optional(await safe(target, rel)),
+        expected = state?.files[rel];
+      if (expected ? !data || hash(data) !== expected : data !== null)
+        throw new Error(`Conflict: ${rel} is unowned or modified`);
+    }
+    const barrelPath = "src/channels/index.ts",
+      barrel = (await fs.readFile(await safe(target, barrelPath))).toString();
+    const imports = parsed(barrel, barrelPath).statements.filter(
+      (n) =>
+        ts.isImportDeclaration(n) &&
+        ts.isStringLiteral(n.moduleSpecifier) &&
+        n.moduleSpecifier.text === "./napcat.js",
+    );
+    if (
+      state
+        ? imports.length !== 1 || !barrel.includes(state.barrelAddition)
+        : imports.length !== 0
+    )
+      throw new Error(
+        "Conflict: NapCat barrel registration is unowned or modified",
+      );
+    const pkgPath = await safe(target, "package.json"),
+      pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
+    const changes = new Map(),
+      added = state?.addedDependencies ?? [];
+    if (command === "install") {
+      for (const [section, name, version] of pins) {
+        const existing =
+          pkg.dependencies?.[name] ?? pkg.devDependencies?.[name];
+        if (existing && existing !== version)
+          throw new Error(
+            `Conflict: ${name} already uses ${existing}; required exact pin ${version}`,
+          );
+        if (!existing) {
+          pkg[section] ??= {};
+          pkg[section][name] = version;
+          added.push([section, name, version]);
+        }
+      }
+      const hashes = {};
+      for (const [from, to] of entries) {
+        const data = await fs.readFile(path.join(source, from));
+        changes.set(to, data);
+        hashes[to] = hash(data);
+      }
+      const addition =
+        state?.barrelAddition ??
+        (barrel.endsWith("\n") || !barrel ? "" : "\n") + importLine;
+      changes.set(barrelPath, Buffer.from(state ? barrel : barrel + addition));
+      changes.set(
+        statePath,
+        Buffer.from(
+          JSON.stringify(
+            {
+              version: 1,
+              files: hashes,
+              barrelAddition: addition,
+              addedDependencies: added,
+            },
+            null,
+            2,
+          ) + "\n",
+        ),
+      );
+    } else {
+      for (const rel of owned) changes.set(rel, null);
+      changes.set(statePath, null);
+      changes.set(
+        barrelPath,
+        Buffer.from(barrel.replace(state.barrelAddition, "")),
+      );
+      const shared = await usedElsewhere(target, owned);
+      for (const [section, name, version] of added) {
+        if (
+          !pins.some(
+            (p) => p[0] === section && p[1] === name && p[2] === version,
+          )
+        )
+          throw new Error("Conflict: invalid dependency ownership");
+        if (pkg[section]?.[name] === version && !shared)
+          delete pkg[section][name];
+        else console.log(`Retain shared/user dependency ${name}`);
+      }
+    }
+    const currentPkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
+    const depChanged = JSON.stringify(pkg) !== JSON.stringify(currentPkg);
+    if (depChanged)
+      changes.set(
+        "package.json",
+        Buffer.from(JSON.stringify(pkg, null, 2) + "\n"),
+      );
+    for (const [rel, data] of [...changes]) {
+      const existing = await optional(await safe(target, rel));
+      if (data === null ? existing === null : existing?.equals(data))
+        changes.delete(rel);
+    }
+    if (dry) {
+      console.log(`Dry run: ${command} ${target}`);
+      for (const [rel, data] of changes)
+        console.log(`${data === null ? "delete" : "write"} ${rel}`);
+      if (depChanged)
+        console.log(
+          "update dependency lockfile (staged before target changes)",
+        );
+      return;
+    }
+    if (depChanged) {
+      const [lock, data] = await updatedLock(target, pkg);
+      changes.set(lock, data);
+    }
+    await apply(target, changes);
+    console.log(
+      `${command} complete (${changes.size} files changed). Run the host package manager with its frozen lockfile, then build.`,
+    );
+  } finally {
+    if (lockHandle) {
+      await lockHandle.close();
+      await fs.rm(path.join(target, ".napcat-install.lock"), { force: true });
+    }
+  }
+}
+main().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
