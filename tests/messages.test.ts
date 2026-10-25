@@ -98,7 +98,7 @@ test("downloads image to Base64 and keeps text for unavailable, oversized or non
     server.close();
   });
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
-  const images = new ImageLoader({ timeoutMs: 40 });
+  const images = new ImageLoader({ timeoutMs: 2000 });
   const result = await convertInbound(
     event({
       message: [
@@ -120,7 +120,7 @@ test("downloads image to Base64 and keeps text for unavailable, oversized or non
           { type: "image", data: { url: base + url } },
         ],
       }),
-      images,
+      url === "/slow" ? new ImageLoader({ timeoutMs: 40 }) : images,
       async () => null,
     );
     assert.match((r?.message.content as any).text, /caption.*图片不可用/s);

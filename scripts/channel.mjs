@@ -74,7 +74,6 @@ async function compatibility(target) {
     path.join(source, "tests/host/channels/adapter.ts"),
     "utf8",
   );
-  const printer = ts.createPrinter({ removeComments: true });
   const declarations = (text) =>
     new Map(
       parsed(text, "adapter.ts")
@@ -83,15 +82,30 @@ async function compatibility(target) {
     );
   const actual = declarations(current),
     expected = declarations(baseline);
-  const signature = (n) =>
-    printer
-      .printNode(ts.EmitHint.Unspecified, n, n.getSourceFile())
-      .replace(/\s+/g, "");
+  // Compare syntax structure rather than printer output: quote style and
+  // trailing commas carry no contract meaning.
+  const tree = (node) => {
+    const children = [];
+    ts.forEachChild(node, (child) => {
+      children.push(tree(child));
+    });
+    return [
+      node.kind,
+      ts.isIdentifier(node) ||
+      ts.isStringLiteral(node) ||
+      ts.isNumericLiteral(node)
+        ? node.text
+        : null,
+      children,
+    ];
+  };
+  const signature = (node) => JSON.stringify(tree(node));
   for (const name of [
     "ChannelAdapter",
     "ChannelSetup",
     "InboundMessage",
     "OutboundMessage",
+    "OutboundFile",
     "ChannelDefaults",
     "ChannelContextDefaults",
   ]) {
@@ -131,18 +145,87 @@ async function compatibility(target) {
   }
 }
 async function usedElsewhere(target, excluded) {
+  const packageRef = (value) =>
+    value === "ws" ||
+    value.startsWith("ws/") ||
+    value === "@types/ws" ||
+    value.startsWith("@types/ws/");
+  const ignored = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "data",
+    "logs",
+    ".superpowers",
+  ]);
+  function consumes(text, file) {
+    const tree = parsed(text, file);
+    if (tree.typeReferenceDirectives.some((r) => packageRef(r.fileName)))
+      return true;
+    let found = false;
+    function visit(node) {
+      if (
+        (ts.isImportDeclaration(node) ||
+          ts.isExportDeclaration(node) ||
+          ts.isModuleDeclaration(node)) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier) &&
+        packageRef(node.moduleSpecifier.text)
+      )
+        found = true;
+      if (
+        ts.isModuleDeclaration(node) &&
+        ts.isStringLiteral(node.name) &&
+        packageRef(node.name.text)
+      )
+        found = true;
+      if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) &&
+            node.expression.text === "require")) &&
+        node.arguments[0] &&
+        ts.isStringLiteral(node.arguments[0]) &&
+        packageRef(node.arguments[0].text)
+      )
+        found = true;
+      if (
+        ts.isImportTypeNode(node) &&
+        ts.isLiteralTypeNode(node.argument) &&
+        ts.isStringLiteral(node.argument.literal) &&
+        packageRef(node.argument.literal.text)
+      )
+        found = true;
+      if (!found) ts.forEachChild(node, visit);
+    }
+    visit(tree);
+    return found;
+  }
   async function walk(dir) {
-    for (const e of await fs.readdir(dir, { withFileTypes: true })) {
-      if (e.isSymbolicLink()) continue;
-      const file = path.join(dir, e.name),
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      if (ignored.has(entry.name)) continue;
+      const file = path.join(dir, entry.name),
         rel = path.relative(target, file).split(path.sep).join("/");
-      if (e.isDirectory()) {
+      if (excluded.has(rel)) continue;
+      if (entry.isSymbolicLink()) {
+        if (/\.[cm]?[jt]sx?$/.test(file)) return true;
+        continue;
+      }
+      if (entry.isDirectory()) {
         if (await walk(file)) return true;
-      } else if (/\.[cm]?[jt]sx?$/.test(file) && !excluded.has(rel)) {
-        const text = await fs.readFile(file, "utf8");
+      } else if (
+        /\.[cm]?[jt]sx?$/.test(file) &&
+        consumes(await fs.readFile(file, "utf8"), file)
+      )
+        return true;
+      else if (entry.name === "package.json") {
+        const pkg = JSON.parse(await fs.readFile(file, "utf8"));
+        if (pkg.peerDependencies?.ws || pkg.optionalDependencies?.ws)
+          return true;
+        // Package scripts can consume ws without a standalone source file.
         if (
-          /(?:from\s*|import\s*\(|require\s*\()\s*['"](?:ws|@types\/ws)(?:\/[^'"]*)?['"]/.test(
-            text,
+          Object.values(pkg.scripts ?? {}).some((value) =>
+            /\b(?:ws|@types\/ws)\b/.test(value),
           )
         )
           return true;
@@ -150,14 +233,7 @@ async function usedElsewhere(target, excluded) {
     }
     return false;
   }
-  for (const root of ["src", "scripts", "setup", "container"]) {
-    try {
-      if (await walk(path.join(target, root))) return true;
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
-    }
-  }
-  return false;
+  return walk(target);
 }
 async function updatedLock(target, pkg) {
   const pnpm =
@@ -303,23 +379,43 @@ async function main() {
       pkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));
     const changes = new Map(),
       added = state?.addedDependencies ?? [];
+    const promoted = state?.promotedDependencies ?? [];
     if (command === "install") {
       for (const [section, name, version] of pins) {
-        const existing =
-          pkg.dependencies?.[name] ?? pkg.devDependencies?.[name];
-        if (existing && existing !== version)
-          throw new Error(
-            `Conflict: ${name} already uses ${existing}; required exact pin ${version}`,
-          );
-        if (!existing) {
+        const own = pkg[section]?.[name];
+        const otherSection =
+          section === "dependencies" ? "devDependencies" : "dependencies";
+        const other = pkg[otherSection]?.[name];
+        for (const existing of [own, other])
+          if (existing && existing !== version)
+            throw new Error(
+              `Conflict: ${name} already uses ${existing}; required exact pin ${version}`,
+            );
+        if (!own && (section === "dependencies" || !other)) {
           pkg[section] ??= {};
           pkg[section][name] = version;
-          added.push([section, name, version]);
+          if (!added.some((p) => p[0] === section && p[1] === name))
+            added.push([section, name, version]);
+          if (section === "dependencies" && other) {
+            delete pkg[otherSection][name];
+            if (!promoted.some((p) => p[0] === name))
+              promoted.push([name, version]);
+          }
         }
       }
       const hashes = {};
       for (const [from, to] of entries) {
-        const data = await fs.readFile(path.join(source, from));
+        let data = await fs.readFile(path.join(source, from));
+        if (from === "README.md")
+          data = Buffer.from(
+            data
+              .toString()
+              .replaceAll("](skills/add-napcat/REMOVE.md)", "](REMOVE.md)")
+              .replace(
+                "[docs/PROGRESS.md](docs/PROGRESS.md)",
+                "源码包中的 docs/PROGRESS.md",
+              ),
+          );
         changes.set(to, data);
         hashes[to] = hash(data);
       }
@@ -336,6 +432,7 @@ async function main() {
               files: hashes,
               barrelAddition: addition,
               addedDependencies: added,
+              promotedDependencies: promoted,
             },
             null,
             2,
@@ -357,9 +454,14 @@ async function main() {
           )
         )
           throw new Error("Conflict: invalid dependency ownership");
-        if (pkg[section]?.[name] === version && !shared)
+        if (pkg[section]?.[name] === version && !shared) {
           delete pkg[section][name];
-        else console.log(`Retain shared/user dependency ${name}`);
+          if (promoted.some((p) => p[0] === name && p[1] === version)) {
+            pkg.devDependencies ??= {};
+            if (pkg.devDependencies[name] === undefined)
+              pkg.devDependencies[name] = version;
+          }
+        } else console.log(`Retain shared/user dependency ${name}`);
       }
     }
     const currentPkg = JSON.parse(await fs.readFile(pkgPath, "utf8"));

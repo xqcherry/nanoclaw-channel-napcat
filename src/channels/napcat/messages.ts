@@ -62,9 +62,7 @@ export class ImageLoader {
   private controllers = new Set<AbortController>();
   private closed = false;
   constructor(private options: { timeoutMs?: number } = {}) {}
-  async load(
-    source: string,
-  ): Promise<{
+  async load(source: string): Promise<{
     data: string;
     mimeType: string;
     size: number;

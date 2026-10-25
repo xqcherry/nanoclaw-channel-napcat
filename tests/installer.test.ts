@@ -150,3 +150,101 @@ test("refuses changed registration and preserves unrelated new files on uninstal
     "keep",
   );
 });
+
+test("interface compatibility ignores quote style and trailing commas", async (t) => {
+  const dir = await target(t),
+    file = path.join(dir, "src/channels/adapter.ts");
+  const text = (await readFile(file, "utf8"))
+    .replace(/"auto"/g, "'auto'")
+    .replace(/,(\s*\))/g, "$1");
+  await writeFile(file, text);
+  const r = run("install", dir, "--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+});
+test("promotes existing development-only ws to runtime and restores it on uninstall", async (t) => {
+  const dir = await target(t),
+    file = path.join(dir, "package.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      type: "module",
+      dependencies: {},
+      devDependencies: { ws: "8.22.0", "@types/ws": "8.18.2" },
+    }),
+  );
+  let r = run("install", dir);
+  assert.equal(r.status, 0, r.stderr);
+  let pkg = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(pkg.dependencies.ws, "8.22.0");
+  assert.equal(pkg.devDependencies.ws, undefined);
+  r = run("install", dir);
+  assert.equal(r.status, 0, r.stderr);
+  r = run("uninstall", dir);
+  assert.equal(r.status, 0, r.stderr);
+  pkg = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(pkg.dependencies.ws, undefined);
+  assert.equal(pkg.devDependencies.ws, "8.22.0");
+});
+test("retains introduced ws when root tests use a side-effect import", async (t) => {
+  const dir = await target(t),
+    file = path.join(dir, "package.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      type: "module",
+      devDependencies: { "@types/ws": "8.18.2" },
+    }),
+  );
+  let r = run("install", dir);
+  assert.equal(r.status, 0, r.stderr);
+  await mkdir(path.join(dir, "tests"));
+  await writeFile(path.join(dir, "tests/other.test.ts"), 'import "ws";\n');
+  r = run("uninstall", dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    JSON.parse(await readFile(file, "utf8")).dependencies.ws,
+    "8.22.0",
+  );
+});
+test("removes introduced dependency with no other consumers", async (t) => {
+  const dir = await target(t),
+    file = path.join(dir, "package.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      type: "module",
+      devDependencies: { "@types/ws": "8.18.2" },
+    }),
+  );
+  let r = run("install", dir);
+  assert.equal(r.status, 0, r.stderr);
+  r = run("uninstall", dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(
+    JSON.parse(await readFile(file, "utf8")).dependencies.ws,
+    undefined,
+  );
+});
+
+test("installed README links resolve inside the installed skill directory", async (t) => {
+  const dir = await target(t),
+    r = run("install", dir);
+  assert.equal(r.status, 0, r.stderr);
+  const root = path.join(dir, ".claude/skills/add-napcat"),
+    readme = await readFile(path.join(root, "README.md"), "utf8");
+  for (const match of readme.matchAll(/\]\(([^)]+)\)/g)) {
+    if (!/^https?:/.test(match[1])) await access(path.join(root, match[1]));
+  }
+});
+
+test("rejects incompatible outbound image file contract before installing", async (t) => {
+  const dir = await target(t),
+    file = path.join(dir, "src/channels/adapter.ts");
+  await writeFile(
+    file,
+    (await readFile(file, "utf8")).replace("data: Buffer;", "data: string;"),
+  );
+  const r = run("install", dir, "--dry-run");
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /Incompatible host: OutboundFile.data/);
+});
