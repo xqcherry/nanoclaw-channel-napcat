@@ -2,11 +2,18 @@
   "name": "nanoclaw-channel-napcat",
   "version": "0.1.0",
   "private": true,
+  "description": "Native NapCat QQ channel for NanoClaw v2 with automated Docker setup",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xqcherry/nanoclaw-channel-napcat.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "test": "tsx --test tests/*.test.ts",
     "build": "tsc --noEmit",
     "install:channel": "node scripts/channel.mjs install",

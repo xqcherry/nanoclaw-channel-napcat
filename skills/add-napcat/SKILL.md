@@ -5,6 +5,18 @@ description: 安装、配置和验证 NanoClaw v2 的 NapCat QQ 渠道；支持�
 
 # 添加 NapCat QQ 渠道
 
+## 默认：完整安装
+
+新用户默认安装 NapCat，已有部署可复用。先在源码包根目录运行 `npm ci --ignore-scripts`，然后运行 `npm run setup -- --target <NanoClaw绝对路径> --dry-run`，确认目标后去掉 `--dry-run`。该命令自动安装渠道、宿主冻结依赖、构建及 Linux Docker NapCat；保留微信配置。Docker 和 Compose 需已可用。
+
+首次没有机器人号时，打开 `http://127.0.0.1:6099/webui/`；Token 存在目标本机 `data/napcat/config/webui.json` 的 `token` 字段，不复制到聊天或日志。引导用户扫码登录，再运行同一命令并增加 `--self-id <机器人QQ> --user-qq <用户QQ> --agent <agent-folder或ID>`。确认宿主 systemd 用户服务名后可增加 `--service <unit.service>` 完成重启。账号未提供时渠道保持禁用。普通成员绑定不授予 admin/owner。
+
+已有 NapCat 使用 `--external-napcat --self-id <机器人QQ>`，先在宿主 `.env` 填写双方一致的 `NAPCAT_ACCESS_TOKEN`，再按 README 检查网络、反向 WS 和登录账号。自动部署仅支持 Linux host 网络；其他平台复用外部服务。
+
+`data/napcat/` 保存登录与配置，首次镜像拉取后固定 digest。重复运行复用密钥；冲突停止并要求审阅。安装成功不等于真实 QQ 已联调；仍执行 README 的人工清单。
+
+## 仅安装渠道源码
+
 1. 确认用户指定的 NanoClaw 目标目录，读取目标的 AGENTS.md 和 CONTRIBUTING.md。保留所有现有渠道。
 2. 找到本独立源码包的根目录，设置 `NAPCAT_SOURCE` 为其绝对路径、`NANOCLAW_TARGET` 为目标绝对路径。运行 `npm ci --ignore-scripts` 安装源码包工具依赖。
 3. 在源码包根目录执行 `node scripts/channel.mjs install --target "$NANOCLAW_TARGET" --dry-run`。解决报告的接口不兼容或同名文件冲突后，运行相同命令去掉 `--dry-run` 完成安装。安装记录保存于目标 `.claude/skills/add-napcat/install-state.json`；保留源码包以便更新和卸载。

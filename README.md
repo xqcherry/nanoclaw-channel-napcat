@@ -1,102 +1,149 @@
-# NanoClaw NapCat QQ 渠道
+# NanoClaw NapCat QQ Channel
 
-独立源码安装包，面向 NanoClaw v2、Node.js 22+。原生 ChannelAdapter 在宿主进程监听单账号 OneBot 11 Universal 反向 WebSocket，支持私聊、群聊、文字、图片、精确 @、引用及文字选项回复。
+**English** | [简体中文](README.zh-CN.md)
 
-完整安装、网络配置、QQ 身份与 agent 绑定、排障及验收说明见下文。
+[![npm CI](https://github.com/xqcherry/nanoclaw-channel-napcat/actions/workflows/npm-ci.yml/badge.svg)](https://github.com/xqcherry/nanoclaw-channel-napcat/actions/workflows/npm-ci.yml)
+[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Public beta](https://img.shields.io/badge/status-public%20beta-orange)
+[![GitHub stars](https://img.shields.io/github/stars/xqcherry/nanoclaw-channel-napcat?style=flat)](https://github.com/xqcherry/nanoclaw-channel-napcat/stargazers)
+![npm downloads](https://img.shields.io/badge/npm%20downloads-not%20published-lightgrey)
 
-## 安装
+Connect QQ to NanoClaw v2 through [NapCatQQ](https://github.com/NapNeko/NapCatQQ). Includes a native channel adapter and automated NapCat deployment with Docker.
 
-本包默认只交付源码，不改动正在运行的 NanoClaw。准备 Node.js 22+、npm 和目标使用的包管理器，先在源码包根目录运行：
+> **Public beta.** Protocol tests and temporary NanoClaw integration have passed. Real QQ account messaging is still awaiting manual validation. This project is distributed as source; no npm package has been published. The downloads badge reflects that status.
+
+## Features
+
+- Private chats and group chats with exact QQ mentions.
+- Incoming and outgoing text, images, and quoted replies.
+- Text options for interactive questions, with authorization handled by NanoClaw.
+- Authenticated OneBot 11 Universal reverse WebSocket, heartbeat detection, and reconnect handling.
+- Docker setup with persistent QQ login data, generated tokens, and a local WebUI.
+- Repeatable channel installation and removal while preserving existing channels, including WeChat.
+
+## Requirements
+
+- A working NanoClaw v2 installation. Integration was checked against `2026.10.1-rc.2`; the installer checks the consumed adapter interface before changing files.
+- Node.js 22+, npm, and the host repository's package manager.
+- Linux with Docker Engine and Docker Compose for automatic NapCat deployment.
+- A QQ account to log in as the bot, and an agent group to bind your chat to.
+
+Other platforms can use an existing NapCat deployment with the external mode below. This package runs inside the NanoClaw host process; it is not a standalone bot server.
+
+## Quick start
+
+Clone this repository, then run from its root:
 
 ```bash
+git clone https://github.com/xqcherry/nanoclaw-channel-napcat.git
+cd nanoclaw-channel-napcat
 npm ci --ignore-scripts
-npm test
-npm run build
-node scripts/channel.mjs install --target /absolute/path/to/nanoclaw --dry-run
-node scripts/channel.mjs install --target /absolute/path/to/nanoclaw
+npm run setup -- --target /absolute/path/to/nanoclaw --dry-run
+npm run setup -- --target /absolute/path/to/nanoclaw
 ```
 
-再到目标目录执行：
+Setup installs the adapter, installs host dependencies using the frozen lockfile, builds the host, and starts NapCat through Docker Compose. It pins the pulled image by digest and saves login data, configuration, and plugins under the host's `data/napcat/` directory. Keep the source repository for future updates and removal.
+
+Open **http://127.0.0.1:6099/webui/**. The WebUI login token is the `token` field in the local `data/napcat/config/webui.json` file. Tokens are generated locally and are not printed by setup. Scan the QR code with the QQ account that should act as the bot.
+
+After login, finish the configuration:
 
 ```bash
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm run build
-pnpm exec vitest run src/channels/napcat.registration.test.ts
+npm run setup -- --target /absolute/path/to/nanoclaw \
+  --self-id 123456789 --user-qq 11223344 --agent my-agent \
+  --service nanoclaw-example.service
 ```
 
-npm 管理的目标使用 `npm ci --ignore-scripts`。按宿主自己的规则构建需要的原生依赖。安装器先检查实际接口和冲突，将源码复制到 `src/channels/napcat*`，追加一条 `import './napcat.js';`，安装 `/add-napcat` 技能和示例，并固定 `ws@8.22.0`、`@types/ws@8.18.2`。依赖锁文件在临时目录生成成功后才写目标；`--dry-run` 不写文件或访问依赖注册表。重复安装不重复注册，修改过的渠道文件会报告冲突并停止。其他渠道的 import 和文件保持用户原有内容。
+Replace the example values:
 
-安装所有权和文件 SHA-256 记录在 `.claude/skills/add-napcat/install-state.json`。保留本源码包，以便重装和卸载。目标若已有不同版本的同名直接依赖，先由维护者统一版本；安装器会停止，避免改写共享依赖。兼容性检查严格比较已消费的适配器接口签名，接口变动需重新评估后更新开发契约快照。目标不支持依赖 `workspace:` 的多包工作区安装。
-
-## 宿主配置
-
-将 [config.example.env](config.example.env) 的六项配置填到目标 `.env`，将示例值换为实际值。也支持宿主进程环境变量，优先于 `.env`。
-
-| 变量 | 含义与默认值 |
+| Option | Meaning |
 | --- | --- |
-| `NAPCAT_ENABLED` | 只有 `true` 启用；默认禁用 |
-| `NAPCAT_HOST` | 监听地址，默认 `127.0.0.1` |
-| `NAPCAT_PORT` | 监听端口，默认 `3002` |
-| `NAPCAT_PATH` | 精确 WebSocket 路径，默认 `/onebot/v11/ws` |
-| `NAPCAT_ACCESS_TOKEN` | 必填，双方一致的随机 Token |
-| `NAPCAT_SELF_ID` | 必填，NapCat 登录的机器人 QQ 号 |
+| `--target` | Absolute path to the NanoClaw host |
+| `--self-id` | QQ number of the account logged into NapCat |
+| `--user-qq` | Your QQ number, used to chat with the bot |
+| `--agent` | Agent folder or ID returned by `ncl groups list` |
+| `--service` | Exact systemd user service to restart; omit to restart manually |
+| `--external-napcat` | Reuse an existing NapCat service instead of deploying Docker |
+| `--dry-run` | Print the intended steps without changing files or accessing the network |
 
-Token 只供 NapCat 与宿主鉴权，不进入 agent 容器。安装器不填写真实配置。`.env` 已忽略，请在目标确认同样忽略。监听成功后宿主初始化即可完成；只有反向连接通过 Token、账号头和 `get_login_info` 校验才在线。
+The user binding grants ordinary member access, creates a private chat, and adds a wiring with `sender-scope known`. It does not grant owner or admin roles. Before a bot QQ number is supplied, setup leaves the QQ channel disabled so you can complete login first. A successful setup is not proof that the QQ account is online.
 
-## NapCat 反向 WebSocket
+Automatic deployment currently uses Linux host networking. The WebUI and adapter listen on loopback. To log in on a remote server, forward the WebUI port with `ssh -L 6099:127.0.0.1:6099 user@server`, then open the local URL. Repeat setup reuses tokens and login data and refuses conflicting managed files.
 
-在 [NapCat WebUI](https://napneko.github.io/config/basic) 添加 **WebSocket 客户端**（反向 WS）：
+## Use an existing NapCat
 
-- URL：`ws://127.0.0.1:3002/onebot/v11/ws`，按下表替换主机地址。
-- Token：与 `NAPCAT_ACCESS_TOKEN` 一致，NapCat 通过 `Authorization: Bearer …` 发送。
-- 消息格式：`array`（结构化消息段）；启用事件上报、心跳和断线重连。该客户端必须提供 Universal API 与事件双工连接，`X-Client-Role: Universal`、`X-Self-ID: <机器人QQ号>`。
-- 保存并启用客户端，登录配置的 QQ 账号。OneBot 请求及 `echo` 关联按 [OneBot 11 反向 WS](https://github.com/botuniverse/onebot-11/blob/master/communication/ws-reverse.md)；接口依据 [NapCat API](https://napneko.github.io/onebot/api)。
+Put your existing OneBot token in the NanoClaw `.env`, then run:
 
-| 部署方式 | 宿主监听 | NapCat 客户端 URL 的主机 |
+```bash
+npm run setup -- --target /absolute/path/to/nanoclaw \
+  --external-napcat --self-id 123456789
+```
+
+Configure a **WebSocket client / reverse WebSocket** in [NapCat WebUI](https://napneko.github.io/config/basic):
+
+- URL: `ws://127.0.0.1:3002/onebot/v11/ws`, adjusted for your deployment network.
+- Token: the host's `NAPCAT_ACCESS_TOKEN`, sent as a Bearer token.
+- Message format: `array`; enable event reporting, heartbeat, and reconnection.
+- The connection must provide Universal API and events with `X-Client-Role: Universal` and `X-Self-ID: <bot QQ>`.
+
+| Deployment | Host listen address | NapCat connects to |
 | --- | --- | --- |
-| 两者在同一主机 | `127.0.0.1` | `127.0.0.1` |
-| NapCat 在 Docker，NanoClaw 在宿主 | 可被容器到达的地址，如 `0.0.0.0` | `host.docker.internal`；Linux 配置 `extra_hosts: ["host.docker.internal:host-gateway"]` |
-| 两者在同一 Docker 网络 | NanoClaw 容器内 `0.0.0.0` | NanoClaw 服务名，如 `nanoclaw` |
-| 两者在不同机器 | 可到达的内网地址 | NanoClaw 内网 IP；经不可信网络使用受信任的 TLS 反向代理 `wss://` |
+| Same machine or automatic Linux deployment | `127.0.0.1` | `127.0.0.1` |
+| NapCat in bridge Docker, NanoClaw on host | An address reachable from Docker, e.g. `0.0.0.0` | `host.docker.internal`; Linux needs `host-gateway` mapping |
+| Same Docker network | `0.0.0.0` inside NanoClaw container | NanoClaw service name |
+| Separate machines | Reachable private address | NanoClaw private IP; use trusted TLS and `wss://` across untrusted networks |
 
-`127.0.0.1` 始终指当前容器或机器。不要将 NanoClaw agent 容器误当作适配器所在宿主。图片 URL 也必须能被 NanoClaw 宿主访问，不要求 NapCat 与宿主共享文件系统。
+Loopback always refers to the current machine or container. The adapter runs in the host process, not an agent container. Incoming image URLs must be reachable by that host.
 
-## QQ 身份与 agent 绑定
+## Host configuration
 
-用户标识是 `qq:<用户QQ号>`，私聊地址是 `private:<用户QQ号>`，群聊地址是 `group:<群号>`；机器人号和用户号是不同用途。`openDM` 接受裸 QQ 号或 `qq:` 身份并返回私聊地址。
+The six variables in [config.example.env](config.example.env) belong in the NanoClaw host `.env`. Host process environment variables take precedence. Keep `.env` and runtime data out of Git.
 
-在已运行并可用的宿主，使用本机管理员 CLI 操作。先检查 `ncl users help`、`ncl messaging-groups help`、`ncl wirings help`；下面的用户、群号和 agent 参数都是示例，替换后再执行：
+| Variable | Default / purpose |
+| --- | --- |
+| `NAPCAT_ENABLED` | Disabled unless exactly `true` |
+| `NAPCAT_HOST` | `127.0.0.1` |
+| `NAPCAT_PORT` | `3002` |
+| `NAPCAT_PATH` | `/onebot/v11/ws`, matched exactly |
+| `NAPCAT_ACCESS_TOKEN` | Required shared OneBot token |
+| `NAPCAT_SELF_ID` | Required bot QQ number |
+
+Tokens are only used between NapCat and the host; they are not passed into agent containers. The adapter becomes online only after token, account headers, and `get_login_info` have been verified.
+
+## Manual bindings and group chats
+
+Platform user IDs are `qq:<QQ>`. Addresses are `private:<QQ>` and `group:<group number>`. Use the local administrator CLI on the running host; check each resource's `help` output before applying examples:
 
 ```bash
 ncl groups list
-ncl users create --id qq:11223344 --kind qq --display-name 'QQ 用户'
+ncl users create --id qq:11223344 --kind qq --display-name 'QQ user'
 ncl members add --user qq:11223344 --group <agent-group-id>
-ncl messaging-groups create --channel-type qq --platform-id private:11223344 --name 'QQ 私聊' --is-group 0 --unknown-sender-policy strict
+ncl messaging-groups create --channel-type qq --platform-id private:11223344 --name 'QQ DM' --is-group 0 --unknown-sender-policy strict
 ncl wirings create --channel-type qq --platform-id private:11223344 --agent-group <agent-folder> --sender-scope known
 ```
 
-群聊使用另一条 messaging group 和 wiring：
+For a group, create a separate messaging group and wiring:
 
 ```bash
-ncl messaging-groups create --channel-type qq --platform-id group:55667788 --name 'QQ 群' --is-group 1 --unknown-sender-policy strict
+ncl messaging-groups create --channel-type qq --platform-id group:55667788 --name 'QQ group' --is-group 1 --unknown-sender-policy strict
 ncl wirings create --channel-type qq --platform-id group:55667788 --agent-group <agent-folder> --sender-scope known
 ```
 
-请把 `<agent-group-id>` 和 `<agent-folder>` 替换成 `ncl groups list` 返回值，不要带尖括号执行。成员资格满足普通交流需求；需要审批管理权限时，由用户明确决定授予 `ncl roles grant --user qq:11223344 --role admin --group <agent-group-id>`。身份字段直接取 NapCat 已认证事件中的发送者 QQ 号，消息正文无法替换身份。
+Replace bracketed placeholders before running these commands. Every participating QQ user needs their own identity and access. DMs respond to authorized messages; group chats trigger only on a real QQ `at` segment targeting the bot. Plain text mentions, CQ strings, and `@all` do not trigger. Existing WeChat bindings remain available.
 
-默认私聊匹配所有通过权限检查的消息（使用宿主约定的 `.` 匹配全部，包括纯图片消息），群聊只有 QQ 真实 `at` 消息段精确命中机器人号才触发；`@全体`、正文中的 `@123` 或 CQ 字符串都不算。两个场景均禁用线程、未知发送者策略为 `strict`。群内每位需要使用 agent 的用户都要有对应身份和权限。
+## Messages and limitations
 
-## 消息、图片与交互
+Text is sent as structured plain text; `[CQ:...]` is never interpreted as a command. Incoming quotes use `get_msg` to retrieve context, keeping the quote ID if retrieval fails. Outgoing replies use a structured `reply` segment.
 
-文字始终发送为 `text` 消息段，`[CQ:...]` 当作普通文字。入站引用用 `get_msg` 补充原作者和文字；查不到时保留引用 ID。出站 `replyTo.id` 产生结构化 `reply` 段。
+Images support PNG, JPEG, GIF, and WebP, with file signature checks, a 20 MiB per-image limit, and a 15-second download timeout. Incoming images become Base64 attachments for the host workspace; outgoing images use `base64://`. Failed downloads preserve the text and append an image-unavailable marker.
 
-入站 HTTP(S) 图片下载超时 15 秒，单张上限 20 MiB，校验 PNG、JPEG、GIF 或 WebP 文件头，转 Base64 交给宿主保存到工作区。下载失败保留消息文字并追加 `[图片不可用]`。出站使用宿主 outbox 文件的图片字节，以 `base64://` 发送；首版不支持文件、语音、好友申请及群管理。
+Answer an interactive text question with `/nc-answer <question ID> <option number>`, numbered from 1. Actual sender identity and chat address are passed to the core for authorization. Expired questions and invalid options are ignored.
 
-问题呈现完整标题、问题和从 1 开始的文字选项。用户发送 `/nc-answer <问题ID> <选项序号>`，适配器通过宿主实时问题解析器找到选项值，并携带实际发送者 `qq:<QQ号>`、实际会话地址传给 `onAction`。过期问题和越界选项不触发；是否有权回答由核心判断。命令不触发额外 agent 回复。需要专有自定义审批展示的 `requirePresentation` 卡片会投递失败；普通问题和标准文字选项可用。OneBot 没有消息文本编辑接口，宿主终态更新以新消息补充展示。
+Current scope: one account, reverse WebSocket, no threads. Files, voice, friend requests, and group management are not supported. Cards requiring proprietary `requirePresentation` rendering fail explicitly. OneBot has no text-edit API, so terminal question updates arrive as new messages.
 
-API 默认等待 15 秒；断线、重连替换和关闭会立即拒绝对应连接的待处理请求。适配器不重放发送，投递失败交回宿主处理。网络丢失回执时，远端可能已经收到消息，宿主重试可能重复发送。WebSocket 每 30 秒 ping，连续一次未收到上一轮 pong 会断开；NapCat 报告账号 offline 时也会断开。重复入站事件缓存上限 2048、保留 5 分钟，宿主重启后重新建立。
+API requests time out after 15 seconds. Disconnects reject pending calls, and the adapter does not replay uncertain sends. A host retry may duplicate a message if the original delivery succeeded but its acknowledgement was lost. Deduplication holds up to 2,048 incoming events for five minutes and resets on host restart.
 
-## 验证
+## Development and validation
 
 ```bash
 npm ci --ignore-scripts
@@ -105,30 +152,57 @@ npm run build
 npm run test:host -- --source /absolute/path/to/nanoclaw
 ```
 
-最后一个命令只复制源码和构建配置到临时目录，不复制 `.env`、运行时数据或 Git，也不修改源宿主。它验证真实宿主构建、barrel 注册、删除 import 后测试确实失败、恢复后卸载和重建。`tests/host/channels/adapter.ts` 是开发用接口快照，不安装到目标；真实兼容性由目标接口检查及临时宿主构建确认。
+The host verification command builds a temporary source copy, checks real barrel registration, proves a missing registration import is detected, and validates removal and rebuild. It does not copy `.env`, runtime data, or Git, or modify the source host.
 
-### 真实 QQ 联调清单
+Real QQ validation is still pending:
 
-本次没有实际 QQ 账号联调，以下均为**待人工验证**，模拟协议通过不代表 QQ 客户端已验证：
+- [ ] Authorized private text messages and rejection of unknown users.
+- [ ] Incoming and outgoing private images.
+- [ ] Real group mentions trigger; forged text and `@all` do not.
+- [ ] Quote context and missing-message fallback.
+- [ ] Text option replies and unauthorized approval rejection.
+- [ ] Recovery after NapCat disconnect and reconnect.
 
-- [ ] 私聊发送文字，确认普通成员可访问已绑定 agent，陌生人无法访问。
-- [ ] 私聊双向图片，确认 agent 工作区能读取图片，QQ 能显示出站图片。
-- [ ] 群内真正 @ 机器人可触发；普通消息、文本伪造 @ 和 @全体不触发。
-- [ ] 引用原消息可见上下文；过旧消息仍保留引用 ID。
-- [ ] 普通问题文字选项可回答；无权用户不能批准审批。
-- [ ] NapCat 断线重连后恢复收发；中断的请求失败并由宿主按策略处理。
+To contribute, open an issue or pull request describing the behavior, change, and validation. Never include real QQ login data, tokens, `.env`, or agent workspaces.
 
-## 排障与卸载
+## Troubleshooting
 
-- 连接 401：检查双方 Token；403：检查机器人账号及 Universal 连接角色；404：核对精确路径。
-- 监听在线但 QQ 离线：检查 `get_login_info` 返回账号、NapCat 登录状态、容器网络与防火墙。
-- 群内无回复：使用 QQ 的真正 @，检查 wiring、`sender-scope known`、成员和宿主权限。
-- 图片不可用：检查宿主访问图片 URL、大小、格式和 15 秒超时；文本仍会保留。
-- 安装失败：按冲突路径审阅用户修改；备份后手工协调，不删除所有权记录绕过检查。异常终止遗留 `.napcat-install.lock` 时，确认没有安装进程运行后手动删除锁文件再重试。
+| Symptom | Check |
+| --- | --- |
+| Connection rejected with 401 | Both sides use the same token |
+| Connection rejected with 403 | Bot account and Universal role headers |
+| Connection rejected with 404 | Exact WebSocket path |
+| Listening but offline | NapCat login, `get_login_info`, network, and firewall |
+| Group gets no reply | Real mention, wiring, known sender, and group membership |
+| Image unavailable | Host URL access, image signature, size, and download timeout |
+| Setup conflict | Review the named file; do not remove ownership records to bypass checks |
+
+Inspect the managed deployment with `docker compose -f /path/to/nanoclaw/data/napcat/compose.yaml ps` or `logs`. Logs can contain login material; inspect them locally.
+
+## Removal
+
+For a channel-only installation, use these low-level commands:
 
 ```bash
+node scripts/channel.mjs install --target /absolute/path/to/nanoclaw --dry-run
+node scripts/channel.mjs install --target /absolute/path/to/nanoclaw
 node scripts/channel.mjs uninstall --target /absolute/path/to/nanoclaw --dry-run
 node scripts/channel.mjs uninstall --target /absolute/path/to/nanoclaw
 ```
 
-随后按 [REMOVE.md](skills/add-napcat/REMOVE.md) 删除六项环境配置、关闭 NapCat 对应客户端，按需通过 `ncl` 清理 qq 绑定，执行宿主冻结锁文件安装和构建。卸载会保留原有依赖和被其他源码使用的共享依赖。完整执行记录见 [docs/PROGRESS.md](docs/PROGRESS.md)。
+After a low-level install or uninstall, run the host's frozen dependency installation and build. The installer checks ownership hashes and interface compatibility, appends one registration import, and pins `ws@8.22.0` and `@types/ws@8.18.2`. Workspaces using `workspace:` dependencies are not supported.
+
+Stop a managed NapCat with `docker compose -f /path/to/nanoclaw/data/napcat/compose.yaml down`. Login data is retained. Follow [REMOVE.md](skills/add-napcat/REMOVE.md) to remove host variables and optional QQ bindings. Channel removal never deletes NapCat account data. Delete `data/napcat/` only if you explicitly intend to erase saved QQ login and configuration.
+
+## Acknowledgements
+
+- [NanoClaw](https://github.com/nanocoai/nanoclaw) provides the host and native channel adapter interface.
+- [NapCatQQ](https://github.com/NapNeko/NapCatQQ) provides the QQ protocol implementation. See the [official documentation](https://napneko.github.io/) for installation and configuration.
+- [NapCat-Docker](https://github.com/NapNeko/NapCat-Docker) supplies the upstream Docker image used by automatic deployment.
+- [OneBot 11](https://github.com/botuniverse/onebot-11) defines the messaging protocol.
+
+Thanks to their maintainers and contributors. This is an independent community integration and is not an official product of those projects.
+
+## License
+
+[MIT](LICENSE) for this repository's code. NapCat, the QQ client, and other upstream components retain their own licenses and terms; this repository does not relicense them.

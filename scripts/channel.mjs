@@ -30,6 +30,8 @@ const entries = [
   ]),
   ["config.example.env", ".claude/skills/add-napcat/config.example.env"],
   ["README.md", ".claude/skills/add-napcat/README.md"],
+  ["README.zh-CN.md", ".claude/skills/add-napcat/README.zh-CN.md"],
+  ["LICENSE", ".claude/skills/add-napcat/LICENSE"],
 ];
 const owned = new Set(entries.map((e) => e[1]));
 const hash = (data) => createHash("sha256").update(data).digest("hex");
@@ -406,7 +408,7 @@ async function main() {
       const hashes = {};
       for (const [from, to] of entries) {
         let data = await fs.readFile(path.join(source, from));
-        if (from === "README.md")
+        if (from === "README.md" || from === "README.zh-CN.md")
           data = Buffer.from(
             data
               .toString()
